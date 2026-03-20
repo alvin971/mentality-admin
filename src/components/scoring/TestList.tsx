@@ -2,6 +2,7 @@
 import { cn } from '@/utils/cn'
 import { Badge } from '@/components/ui/Badge'
 import { WAIS_TESTS, INDEX_COLORS, type CompositeIndex } from '@/types'
+import { TEST_TYPE_MAP, SCORING_TYPE_LABELS, SCORING_TYPE_COLORS } from '@/types/scoring'
 import type { TestConfiguration } from '@/types'
 
 interface TestListProps {
@@ -52,7 +53,12 @@ export function TestList({ configurations, selectedTestId, onSelect }: TestListP
                       isConfigured ? 'bg-emerald-500' : 'bg-orange-400'
                     )}
                   />
-                  {test.name}
+                  <span className="flex-1 truncate">{test.name}</span>
+                  {TEST_TYPE_MAP[test.id] && (
+                    <span className={`hidden lg:inline-flex items-center rounded px-1.5 py-0.5 text-xs font-medium flex-shrink-0 ${SCORING_TYPE_COLORS[TEST_TYPE_MAP[test.id]]}`}>
+                      {SCORING_TYPE_LABELS[TEST_TYPE_MAP[test.id]]?.split(' ')[0]}
+                    </span>
+                  )}
                 </button>
               )
             })}
