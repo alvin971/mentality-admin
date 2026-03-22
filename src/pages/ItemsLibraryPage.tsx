@@ -14,6 +14,22 @@ import { itemsService } from '@/services/items.service'
 import { useAuth } from '@/hooks/useAuth'
 import { WAIS_TESTS } from '@/types'
 import type { ItemLibrary, ItemStatus } from '@/types'
+import { supabase } from '@/lib/supabase'
+import { getItemSuggestions } from '@/services/claude.service'
+import { auditService } from '@/services/audit.service'
+
+interface WaisItem {
+  id: string
+  test_id: string
+  item_number: number
+  stimulus: string
+  scoring_type: string
+  expected_responses: Array<{ answer: string; score: number }>
+  irt_a: number
+  irt_b: number
+  composite_index: string
+  notes?: string
+}
 
 const itemSchema = z.object({
   test_id:          z.string().min(1, 'Sélectionnez un test'),
@@ -41,7 +57,16 @@ const STATUS_LABELS: Record<ItemStatus, string> = {
 
 export function ItemsLibraryPage() {
   const { user } = useAuth()
+  const [activeTab, setActiveTab] = useState<'library' | 'wais'>('wais')
   const [items, setItems] = useState<ItemLibrary[]>([])
+  const [waisItems, setWaisItems] = useState<WaisItem[]>([])
+  const [selectedWaisItem, setSelectedWaisItem] = useState<WaisItem | null>(null)
+  const [waisFilterTest, setWaisFilterTest] = useState('')
+  const [aiSuggestion, setAiSuggestion] = useState('')
+  const [aiLoading, setAiLoading] = useState(false)
+  const [editingStimulus, setEditingStimulus] = useState('')
+  const [editingNotes, setEditingNotes] = useState('')
+  const [savingWais, setSavingWais] = useState(false)
   const [loading, setLoading] = useState(true)
   const [filterTestId, setFilterTestId] = useState('')
   const [filterStatus, setFilterStatus] = useState<ItemStatus | ''>('')
@@ -69,7 +94,87 @@ export function ItemsLibraryPage() {
     }
   }
 
+  async function loadWaisItems() {
+    setLoading(true)
+    try {
+      let query = supabase.from('wais_items').select('*').order('test_id').order('item_number')
+      if (waisFilterTest) query = query.eq('test_id', waisFilterTest)
+      const { data, error } = await query
+      if (error) throw error
+      setWaisItems(data ?? [])
+    } catch (e) {
+      console.error(e)
+    } finally {
+      setLoading(false)
+    }
+  }
+
   useEffect(() => { loadItems() }, [filterTestId, filterStatus, filterRegion]) // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { loadWaisItems() }, [waisFilterTest]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (selectedWaisItem) {
+      setEditingStimulus(selectedWaisItem.stimulus)
+      setEditingNotes(selectedWaisItem.notes ?? '')
+      setAiSuggestion('')
+    }
+  }, [selectedWaisItem])
+
+  async function handleAiSuggest() {
+    if (!selectedWaisItem) return
+    setAiLoading(true)
+    setAiSuggestion('')
+    try {
+      const result = await getItemSuggestions({
+        testId: selectedWaisItem.test_id,
+        itemNumber: selectedWaisItem.item_number,
+        stimulus: selectedWaisItem.stimulus,
+        scoringType: selectedWaisItem.scoring_type,
+        expectedResponses: selectedWaisItem.expected_responses,
+        irtA: selectedWaisItem.irt_a,
+        irtB: selectedWaisItem.irt_b,
+      })
+      setAiSuggestion(result)
+    } catch (e: any) {
+      setAiSuggestion(`Erreur : ${e.message}`)
+    } finally {
+      setAiLoading(false)
+    }
+  }
+
+  async function handleSaveWaisItem() {
+    if (!selectedWaisItem) return
+    setSavingWais(true)
+    try {
+      const { error } = await supabase
+        .from('wais_items')
+        .update({
+          stimulus: editingStimulus,
+          notes: editingNotes,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', selectedWaisItem.id)
+
+      if (error) throw error
+
+      await auditService.log({
+        tableName: 'wais_items',
+        recordId: selectedWaisItem.id,
+        changeType: 'update',
+        oldValue: { stimulus: selectedWaisItem.stimulus, notes: selectedWaisItem.notes },
+        newValue: { stimulus: editingStimulus, notes: editingNotes },
+      })
+
+      setWaisItems(prev => prev.map(it =>
+        it.id === selectedWaisItem.id ? { ...it, stimulus: editingStimulus, notes: editingNotes } : it
+      ))
+      setSelectedWaisItem(prev => prev ? { ...prev, stimulus: editingStimulus, notes: editingNotes } : null)
+    } catch (e: any) {
+      alert(e.message)
+    } finally {
+      setSavingWais(false)
+    }
+  }
 
   async function onSubmit(data: ItemForm) {
     if (!user) return
@@ -99,6 +204,168 @@ export function ItemsLibraryPage() {
 
   return (
     <div className="space-y-5">
+      {/* Onglets principaux */}
+      <div className="flex gap-1 border-b border-clinical-border">
+        <button
+          onClick={() => setActiveTab('wais')}
+          className={`px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors ${activeTab === 'wais' ? 'border-brand-600 text-brand-700' : 'border-transparent text-clinical-muted hover:text-clinical-text'}`}
+        >
+          Items WAIS-IV officiels
+        </button>
+        <button
+          onClick={() => setActiveTab('library')}
+          className={`px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors ${activeTab === 'library' ? 'border-brand-600 text-brand-700' : 'border-transparent text-clinical-muted hover:text-clinical-text'}`}
+        >
+          Bibliothèque alternative
+        </button>
+      </div>
+
+      {/* WAIS Items Tab */}
+      {activeTab === 'wais' && (
+        <div className="grid grid-cols-1 xl:grid-cols-3 gap-5">
+          {/* Liste */}
+          <div className="xl:col-span-1 space-y-3">
+            <div className="flex items-center gap-2">
+              <select
+                value={waisFilterTest}
+                onChange={e => setWaisFilterTest(e.target.value)}
+                className="flex-1 rounded-lg border border-clinical-border bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500"
+              >
+                <option value="">Tous les tests</option>
+                {WAIS_TESTS.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+              </select>
+            </div>
+
+            <div className="bg-white border border-clinical-border rounded-xl overflow-hidden">
+              <div className="px-4 py-3 border-b border-clinical-border">
+                <p className="text-sm font-semibold text-clinical-text">
+                  {waisItems.length} items
+                </p>
+              </div>
+              {loading ? (
+                <div className="p-6 flex justify-center"><Spinner /></div>
+              ) : waisItems.length === 0 ? (
+                <p className="text-sm text-clinical-muted text-center py-8">
+                  Aucun item WAIS trouvé. Exécutez la migration SQL 003.
+                </p>
+              ) : (
+                <div className="overflow-auto max-h-96 divide-y divide-clinical-border/50">
+                  {waisItems.map(item => (
+                    <button
+                      key={item.id}
+                      onClick={() => setSelectedWaisItem(item)}
+                      className={`w-full text-left px-4 py-3 hover:bg-gray-50 transition-colors ${selectedWaisItem?.id === item.id ? 'bg-brand-50 border-l-2 border-l-brand-600' : ''}`}
+                    >
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs text-clinical-muted">{item.test_id} · {item.composite_index}</span>
+                        <span className="text-xs font-mono text-clinical-muted">#{item.item_number}</span>
+                      </div>
+                      <p className="text-sm text-clinical-text mt-0.5 truncate">{item.stimulus}</p>
+                      <p className="text-xs text-clinical-muted mt-0.5">{item.scoring_type} · a={item.irt_a} b={item.irt_b}</p>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Éditeur d'item WAIS */}
+          <div className="xl:col-span-2">
+            {selectedWaisItem ? (
+              <div className="space-y-4">
+                <div className="bg-white border border-clinical-border rounded-xl p-5 space-y-4">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <p className="text-sm font-semibold text-clinical-text">
+                        {selectedWaisItem.test_id} — Item {selectedWaisItem.item_number}
+                      </p>
+                      <p className="text-xs text-clinical-muted mt-0.5">
+                        {selectedWaisItem.scoring_type} · {selectedWaisItem.composite_index} · a={selectedWaisItem.irt_a} b={selectedWaisItem.irt_b}
+                      </p>
+                    </div>
+                    <Badge variant="green">{selectedWaisItem.composite_index}</Badge>
+                  </div>
+
+                  <div className="space-y-3">
+                    <div>
+                      <label className="block text-xs font-medium text-clinical-muted mb-1">Stimulus (question)</label>
+                      <textarea
+                        value={editingStimulus}
+                        onChange={e => setEditingStimulus(e.target.value)}
+                        rows={2}
+                        className="w-full px-3 py-2 text-sm border border-clinical-border rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500 resize-none"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-medium text-clinical-muted mb-1">Réponses attendues</label>
+                      <div className="space-y-1">
+                        {selectedWaisItem.expected_responses.map((r, i) => (
+                          <div key={i} className="flex items-center gap-2 text-xs bg-gray-50 rounded px-2 py-1">
+                            <span className={`px-1.5 py-0.5 rounded font-mono font-bold ${r.score === 2 ? 'bg-green-100 text-green-800' : r.score === 1 ? 'bg-yellow-100 text-yellow-800' : 'bg-gray-200 text-gray-600'}`}>
+                              {r.score}
+                            </span>
+                            <span className="text-clinical-text flex-1 truncate">{r.answer}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-medium text-clinical-muted mb-1">Notes cliniques</label>
+                      <textarea
+                        value={editingNotes}
+                        onChange={e => setEditingNotes(e.target.value)}
+                        rows={2}
+                        placeholder="Biais culturels, difficultés spécifiques, observations..."
+                        className="w-full px-3 py-2 text-sm border border-clinical-border rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500 resize-none"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="flex gap-2">
+                    <button
+                      onClick={handleAiSuggest}
+                      disabled={aiLoading}
+                      className="flex-1 px-3 py-2 text-sm bg-violet-50 border border-violet-200 text-violet-700 rounded-lg hover:bg-violet-100 disabled:opacity-40 flex items-center justify-center gap-2"
+                    >
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
+                      </svg>
+                      {aiLoading ? 'Analyse...' : '✦ Suggestion IA'}
+                    </button>
+                    <button
+                      onClick={handleSaveWaisItem}
+                      disabled={savingWais}
+                      className="flex-1 px-3 py-2 text-sm bg-brand-600 text-white rounded-lg hover:bg-brand-700 disabled:opacity-40 font-medium"
+                    >
+                      {savingWais ? 'Sauvegarde...' : 'Sauvegarder'}
+                    </button>
+                  </div>
+                </div>
+
+                {/* Panel suggestion IA */}
+                {aiSuggestion && (
+                  <div className="bg-white border border-violet-200 rounded-xl p-4">
+                    <div className="flex items-center gap-2 mb-3">
+                      <span className="text-xs font-medium text-violet-800 bg-violet-100 px-2 py-0.5 rounded-full">✦ Analyse IA — Claude</span>
+                      <button onClick={() => setAiSuggestion('')} className="ml-auto text-clinical-muted hover:text-clinical-text text-sm">✕</button>
+                    </div>
+                    <pre className="text-xs text-clinical-text whitespace-pre-wrap font-mono overflow-auto max-h-64">{aiSuggestion}</pre>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="bg-white border border-clinical-border rounded-xl p-8 text-center text-sm text-clinical-muted">
+                Sélectionnez un item dans la liste pour l'éditer ou obtenir une suggestion IA
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Library Tab */}
+      {activeTab === 'library' && (
       <Card padding="md">
         <CardHeader>
           <CardTitle>Bibliothèque d'items ({items.length})</CardTitle>
@@ -206,11 +473,12 @@ export function ItemsLibraryPage() {
           </Table>
         )}
       </Card>
+      )} {/* end activeTab === 'library' */}
 
       {/* Modal création */}
       <Modal open={modalOpen} onClose={() => setModalOpen(false)} title="Nouvel item" size="lg">
         <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div className="flex flex-col gap-1">
               <label className="text-sm font-medium text-clinical-text">Test</label>
               <select
@@ -244,7 +512,7 @@ export function ItemsLibraryPage() {
             error={errors.prompt?.message}
           />
 
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <Input
               type="number" label="Score attendu" min={0} max={4}
               {...register('expected_score', { valueAsNumber: true })}

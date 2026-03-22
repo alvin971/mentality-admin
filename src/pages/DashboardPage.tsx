@@ -64,7 +64,7 @@ export function DashboardPage() {
   return (
     <div className="space-y-6 max-w-5xl">
       {/* Stats KPI */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
         <Card padding="md">
           <p className="text-xs font-medium text-clinical-muted uppercase tracking-wide">Cliniciens actifs</p>
           <p className="text-3xl font-bold text-clinical-text mt-1">{stats?.activeClinicians ?? 0}</p>
@@ -85,7 +85,7 @@ export function DashboardPage() {
         </Card>
       </div>
 
-      <div className="grid lg:grid-cols-2 gap-6">
+      <div className="grid md:grid-cols-2 gap-4">
         {/* Liens rapides */}
         <Card padding="md">
           <CardHeader>

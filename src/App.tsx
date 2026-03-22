@@ -9,6 +9,10 @@ import { ItemsLibraryPage } from '@/pages/ItemsLibraryPage'
 import { AnalyticsPage } from '@/pages/AnalyticsPage'
 import { CollaborationPage } from '@/pages/CollaborationPage'
 import { AdminPage } from '@/pages/AdminPage'
+import { NormativePage } from '@/pages/NormativePage'
+import { IRTPage } from '@/pages/IRTPage'
+import { PreviewPage } from '@/pages/PreviewPage'
+import { AuditPage } from '@/pages/AuditPage'
 import { isConfigured } from '@/lib/supabase'
 
 function SetupPage() {
@@ -83,14 +87,32 @@ export default function App() {
           element={<ProtectedRoute><CollaborationPage /></ProtectedRoute>}
         />
 
+        {/* Cortex clinique — nouvelles pages */}
+        <Route
+          path="/normative"
+          element={<ProtectedRoute><NormativePage /></ProtectedRoute>}
+        />
+        <Route
+          path="/irt"
+          element={<ProtectedRoute><IRTPage /></ProtectedRoute>}
+        />
+        <Route
+          path="/preview"
+          element={<ProtectedRoute><PreviewPage /></ProtectedRoute>}
+        />
+        <Route
+          path="/audit"
+          element={<ProtectedRoute><AuditPage /></ProtectedRoute>}
+        />
+
         {/* Admin only */}
         <Route
           path="/admin"
           element={<ProtectedRoute adminOnly><AdminPage /></ProtectedRoute>}
         />
 
-        {/* Redirect root → login */}
-        <Route path="/" element={<Navigate to="/login" replace />} />
+        {/* Redirect root → dashboard (mode démo) */}
+        <Route path="/" element={<Navigate to="/dashboard" replace />} />
         <Route path="*" element={<Navigate to="/dashboard" replace />} />
       </Routes>
     </BrowserRouter>

@@ -32,9 +32,9 @@ export function ScoreConfigPage() {
   }
 
   return (
-    <div className="flex gap-5 h-[calc(100vh-8rem)]">
+    <div className="flex flex-col md:flex-row gap-4 h-auto md:h-[calc(100vh-8rem)]">
       {/* Sidebar tests */}
-      <Card padding="sm" className="flex-shrink-0 overflow-y-auto">
+      <Card padding="sm" className="md:flex-shrink-0 overflow-y-auto md:w-56">
         <p className="text-xs font-semibold text-clinical-muted uppercase tracking-wide px-2 mb-3">
           Tests WAIS-IV
         </p>

@@ -2,83 +2,152 @@
 import { useEffect, useState } from 'react'
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
-  LineChart, Line, Legend, ScatterChart, Scatter,
+  Legend,
 } from 'recharts'
 import { Card, CardHeader, CardTitle } from '@/components/ui/Card'
 import { Badge } from '@/components/ui/Badge'
 import { Spinner } from '@/components/ui/Spinner'
 import { supabase } from '@/lib/supabase'
 import { WAIS_TESTS } from '@/types'
-
-// Données de démonstration — remplacer par des requêtes Supabase agrégées
-const DEMO_DISTRIBUTION = WAIS_TESTS.map(t => ({
-  name: t.name.length > 10 ? t.name.slice(0, 10) + '…' : t.name,
-  très_faible: Math.floor(Math.random() * 15) + 5,
-  faible:      Math.floor(Math.random() * 20) + 10,
-  moyen:       Math.floor(Math.random() * 30) + 30,
-  élevé:       Math.floor(Math.random() * 20) + 10,
-  très_élevé:  Math.floor(Math.random() * 15) + 5,
-}))
-
-const DEMO_RELIABILITY = WAIS_TESTS.slice(0, 6).map(t => ({
-  test: t.name.length > 10 ? t.name.slice(0, 10) + '…' : t.name,
-  réussite:  Math.floor(Math.random() * 40) + 40,
-  partiel:   Math.floor(Math.random() * 20) + 10,
-  échec:     Math.floor(Math.random() * 20) + 5,
-}))
-
-const DEMO_NORM_COMPARISON = Array.from({ length: 12 }, (_, i) => ({
-  test: WAIS_TESTS[i]?.name.slice(0, 8) ?? `T${i}`,
-  mentality: Math.floor(Math.random() * 30) + 85,
-  wais_iv:   100,
-}))
+import { AGE_GROUPS } from '@/services/normative.service'
 
 interface DashStats {
-  totalSessions: number
-  avgCompletionRate: number
   configuredTests: number
+  waisItemsCount: number
+  normativeGroupsCovered: number
+  recentChanges: number
+}
+
+interface NormativeCoverage {
+  test: string
+  covered: number
+  total: number
+}
+
+interface IRTDistribution {
+  test: string
+  avgA: number
+  avgB: number
+  count: number
 }
 
 export function AnalyticsPage() {
-  const [stats, setStats] = useState<DashStats>({ totalSessions: 0, avgCompletionRate: 0, configuredTests: 0 })
+  const [stats, setStats] = useState<DashStats>({
+    configuredTests: 0,
+    waisItemsCount: 0,
+    normativeGroupsCovered: 0,
+    recentChanges: 0,
+  })
+  const [normCoverage, setNormCoverage] = useState<NormativeCoverage[]>([])
+  const [irtDist, setIrtDist] = useState<IRTDistribution[]>([])
   const [loading, setLoading] = useState(true)
-  const [activeTab, setActiveTab] = useState<'distribution' | 'fiabilite' | 'discontinuation' | 'normes'>('distribution')
+  const [activeTab, setActiveTab] = useState<'coverage' | 'irt' | 'audit' | 'normes'>('coverage')
 
   useEffect(() => {
-    Promise.all([
-      supabase.from('test_configurations').select('*', { count: 'exact', head: true }).eq('is_active', true),
-    ]).then(([{ count }]) => {
-      setStats({ totalSessions: 0, avgCompletionRate: 0, configuredTests: count ?? 0 })
-    }).catch(console.error).finally(() => setLoading(false))
+    loadData()
   }, [])
+
+  async function loadData() {
+    setLoading(true)
+    try {
+      const [
+        { count: configuredTests },
+        { data: waisItems },
+        { data: normEntries },
+        { count: recentChanges },
+      ] = await Promise.all([
+        supabase.from('test_configurations').select('*', { count: 'exact', head: true }).eq('is_active', true),
+        supabase.from('wais_items').select('test_id, irt_a, irt_b').eq('is_active', true),
+        supabase.from('normative_tables').select('test_id, age_group'),
+        supabase.from('change_log').select('*', { count: 'exact', head: true })
+          .gte('changed_at', new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString()),
+      ])
+
+      // Stats globales
+      const waisItemsCount = waisItems?.length ?? 0
+      const normGroups = new Set(normEntries?.map(e => `${e.test_id}|${e.age_group}`) ?? [])
+      setStats({
+        configuredTests: configuredTests ?? 0,
+        waisItemsCount,
+        normativeGroupsCovered: normGroups.size,
+        recentChanges: recentChanges ?? 0,
+      })
+
+      // Couverture normative par test
+      const coverageMap: Record<string, Set<string>> = {}
+      for (const e of normEntries ?? []) {
+        if (!coverageMap[e.test_id]) coverageMap[e.test_id] = new Set()
+        coverageMap[e.test_id].add(e.age_group)
+      }
+      setNormCoverage(WAIS_TESTS.map(t => ({
+        test: t.name.length > 10 ? t.name.slice(0, 10) + '…' : t.name,
+        covered: coverageMap[t.id]?.size ?? 0,
+        total: AGE_GROUPS.length,
+      })))
+
+      // Distribution IRT par test
+      const irtMap: Record<string, { sumA: number; sumB: number; count: number }> = {}
+      for (const item of waisItems ?? []) {
+        if (!irtMap[item.test_id]) irtMap[item.test_id] = { sumA: 0, sumB: 0, count: 0 }
+        irtMap[item.test_id].sumA += item.irt_a
+        irtMap[item.test_id].sumB += item.irt_b
+        irtMap[item.test_id].count++
+      }
+      setIrtDist(Object.entries(irtMap).map(([testId, d]) => {
+        const t = WAIS_TESTS.find(t => t.id === testId)
+        return {
+          test: (t?.name ?? testId).slice(0, 10),
+          avgA: Math.round((d.sumA / d.count) * 100) / 100,
+          avgB: Math.round((d.sumB / d.count) * 100) / 100,
+          count: d.count,
+        }
+      }))
+
+    } catch (e) {
+      console.error(e)
+    } finally {
+      setLoading(false)
+    }
+  }
 
   if (loading) return <div className="flex justify-center pt-16"><Spinner size="lg" /></div>
 
   const TABS = [
-    { key: 'distribution',   label: 'Distribution des scores' },
-    { key: 'fiabilite',      label: 'Fiabilité des items' },
-    { key: 'discontinuation',label: 'Discontinuations' },
-    { key: 'normes',         label: 'Comparaison normes' },
+    { key: 'coverage', label: 'Couverture normative' },
+    { key: 'irt',      label: 'Paramètres IRT' },
+    { key: 'audit',    label: 'Activité admin' },
+    { key: 'normes',   label: 'Comparaison normes' },
   ] as const
 
   return (
     <div className="space-y-5 max-w-5xl">
-      {/* KPIs */}
-      <div className="grid grid-cols-3 gap-4">
+      {/* KPIs — données réelles Supabase */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
         <Card padding="md">
           <p className="text-xs text-clinical-muted uppercase font-medium tracking-wide">Tests configurés</p>
           <p className="text-3xl font-bold text-clinical-text mt-1">{stats.configuredTests}<span className="text-lg font-normal text-clinical-muted">/12</span></p>
         </Card>
         <Card padding="md">
-          <p className="text-xs text-clinical-muted uppercase font-medium tracking-wide">Sessions analysées</p>
-          <p className="text-3xl font-bold text-clinical-text mt-1">{stats.totalSessions}</p>
-          <p className="text-xs text-clinical-muted mt-1">Données anonymisées</p>
+          <p className="text-xs text-clinical-muted uppercase font-medium tracking-wide">Items WAIS chargés</p>
+          <p className="text-3xl font-bold text-clinical-text mt-1">{stats.waisItemsCount}</p>
+          <p className="text-xs text-clinical-muted mt-1">avec paramètres IRT</p>
         </Card>
         <Card padding="md">
-          <p className="text-xs text-clinical-muted uppercase font-medium tracking-wide">Données disponibles</p>
+          <p className="text-xs text-clinical-muted uppercase font-medium tracking-wide">Groupes normatifs</p>
+          <p className="text-3xl font-bold text-clinical-text mt-1">{stats.normativeGroupsCovered}<span className="text-lg font-normal text-clinical-muted">/{WAIS_TESTS.length * AGE_GROUPS.length}</span></p>
+          <div className="mt-1 h-1 bg-gray-200 rounded-full">
+            <div
+              className="h-1 bg-brand-600 rounded-full"
+              style={{ width: `${Math.min(100, (stats.normativeGroupsCovered / (WAIS_TESTS.length * AGE_GROUPS.length)) * 100)}%` }}
+            />
+          </div>
+        </Card>
+        <Card padding="md">
+          <p className="text-xs text-clinical-muted uppercase font-medium tracking-wide">Modifications (7j)</p>
+          <p className="text-3xl font-bold text-clinical-text mt-1">{stats.recentChanges}</p>
           <div className="mt-2">
-            <Badge variant={stats.configuredTests > 0 ? 'green' : 'orange'}>
-              {stats.configuredTests > 0 ? 'Actif' : 'En attente de données'}
+            <Badge variant={stats.recentChanges > 0 ? 'green' : 'gray'}>
+              {stats.recentChanges > 0 ? 'Actif' : 'Aucune modification'}
             </Badge>
           </div>
         </Card>
@@ -86,7 +155,7 @@ export function AnalyticsPage() {
 
       <Card padding="md">
         {/* Onglets */}
-        <div className="flex border-b border-clinical-border mb-6 gap-1">
+        <div className="flex border-b border-clinical-border mb-6 gap-1 flex-wrap">
           {TABS.map(tab => (
             <button
               key={tab.key}
@@ -102,93 +171,118 @@ export function AnalyticsPage() {
           ))}
         </div>
 
-        {activeTab === 'distribution' && (
+        {/* Couverture normative — données réelles */}
+        {activeTab === 'coverage' && (
           <div className="space-y-4">
             <CardHeader>
-              <CardTitle>Distribution des scores bruts par test</CardTitle>
-              <p className="text-xs text-clinical-muted">Données anonymisées — pas d'identifiants personnels</p>
+              <CardTitle>Couverture des tables normatives par test</CardTitle>
+              <p className="text-xs text-clinical-muted">Nombre de groupes d'âge renseignés sur {AGE_GROUPS.length} possibles</p>
             </CardHeader>
-            <ResponsiveContainer width="100%" height={320}>
-              <BarChart data={DEMO_DISTRIBUTION} margin={{ left: -10 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-                <XAxis dataKey="name" tick={{ fontSize: 11 }} />
-                <YAxis tick={{ fontSize: 11 }} />
-                <Tooltip />
-                <Legend wrapperStyle={{ fontSize: 12 }} />
-                <Bar dataKey="très_faible" stackId="a" fill="#ef4444" />
-                <Bar dataKey="faible"      stackId="a" fill="#f97316" />
-                <Bar dataKey="moyen"       stackId="a" fill="#eab308" />
-                <Bar dataKey="élevé"       stackId="a" fill="#3b82f6" />
-                <Bar dataKey="très_élevé"  stackId="a" fill="#10b981" />
-              </BarChart>
-            </ResponsiveContainer>
+            {normCoverage.length > 0 ? (
+              <ResponsiveContainer width="100%" height={320}>
+                <BarChart
+                  data={normCoverage.map(d => ({ ...d, missing: d.total - d.covered }))}
+                  margin={{ left: -10 }}
+                >
+                  <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                  <XAxis dataKey="test" tick={{ fontSize: 11 }} />
+                  <YAxis domain={[0, AGE_GROUPS.length]} tick={{ fontSize: 11 }} />
+                  <Tooltip formatter={(v: number, name: string) => [v, name === 'covered' ? 'Couverts' : 'Manquants']} />
+                  <Legend wrapperStyle={{ fontSize: 12 }} />
+                  <Bar dataKey="covered" stackId="a" fill="#10b981" name="Couverts" />
+                  <Bar dataKey="missing" stackId="a" fill="#e2e8f0" name="Manquants" />
+                </BarChart>
+              </ResponsiveContainer>
+            ) : (
+              <p className="text-sm text-clinical-muted text-center py-12">
+                Aucune table normative renseignée — allez dans <strong>Tables Normatives</strong> pour les saisir.
+              </p>
+            )}
           </div>
         )}
 
-        {activeTab === 'fiabilite' && (
+        {/* Paramètres IRT — données réelles depuis wais_items */}
+        {activeTab === 'irt' && (
           <div className="space-y-4">
             <CardHeader>
-              <CardTitle>Taux de réussite / réponse partielle / échec par test</CardTitle>
+              <CardTitle>Distribution des paramètres IRT par test</CardTitle>
+              <p className="text-xs text-clinical-muted">Moyenne de discrimination (a) et difficulté (b) par test</p>
             </CardHeader>
-            <ResponsiveContainer width="100%" height={320}>
-              <BarChart data={DEMO_RELIABILITY} margin={{ left: -10 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-                <XAxis dataKey="test" tick={{ fontSize: 11 }} />
-                <YAxis tick={{ fontSize: 11 }} unit="%" />
-                <Tooltip formatter={(v: number) => `${v}%`} />
-                <Legend wrapperStyle={{ fontSize: 12 }} />
-                <Bar dataKey="réussite" stackId="a" fill="#10b981" />
-                <Bar dataKey="partiel"  stackId="a" fill="#f59e0b" />
-                <Bar dataKey="échec"    stackId="a" fill="#ef4444" />
-              </BarChart>
-            </ResponsiveContainer>
+            {irtDist.length > 0 ? (
+              <>
+                <ResponsiveContainer width="100%" height={280}>
+                  <BarChart data={irtDist} margin={{ left: -10 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                    <XAxis dataKey="test" tick={{ fontSize: 11 }} />
+                    <YAxis tick={{ fontSize: 11 }} />
+                    <Tooltip />
+                    <Legend wrapperStyle={{ fontSize: 12 }} />
+                    <Bar dataKey="avgA" fill="#4f46e5" name="Discrimination moy. (a)" />
+                    <Bar dataKey="avgB" fill="#10b981" name="Difficulté moy. (b)" />
+                  </BarChart>
+                </ResponsiveContainer>
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                  {irtDist.map(d => (
+                    <div key={d.test} className="bg-gray-50 rounded-lg p-3">
+                      <p className="text-xs font-medium text-clinical-text truncate">{d.test}</p>
+                      <p className="text-xs text-clinical-muted mt-1">{d.count} items — a={d.avgA} b={d.avgB}</p>
+                    </div>
+                  ))}
+                </div>
+              </>
+            ) : (
+              <p className="text-sm text-clinical-muted text-center py-12">
+                Aucun item WAIS chargé — allez dans <strong>IRT</strong> pour importer les items.
+              </p>
+            )}
           </div>
         )}
 
-        {activeTab === 'discontinuation' && (
+        {/* Activité admin — données réelles depuis change_log */}
+        {activeTab === 'audit' && (
           <div className="space-y-4">
             <CardHeader>
-              <CardTitle>Analyse des discontinuations</CardTitle>
+              <CardTitle>Activité de modification administrative</CardTitle>
+              <p className="text-xs text-clinical-muted">{stats.recentChanges} modifications sur les 7 derniers jours</p>
             </CardHeader>
-            <ResponsiveContainer width="100%" height={320}>
-              <ScatterChart margin={{ left: -10 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-                <XAxis type="number" dataKey="x" name="Item #" tick={{ fontSize: 11 }} />
-                <YAxis type="number" dataKey="y" name="Taux discontinuation %" unit="%" tick={{ fontSize: 11 }} />
-                <Tooltip cursor={{ strokeDasharray: '3 3' }} />
-                <Scatter
-                  name="Discontinuations"
-                  data={Array.from({ length: 20 }, (_, i) => ({ x: i + 1, y: Math.random() * 40 }))}
-                  fill="#3a5bff"
-                />
-              </ScatterChart>
-            </ResponsiveContainer>
-            <p className="text-xs text-clinical-muted">
-              Items avec un taux de discontinuation élevé peuvent être mal calibrés ou trop difficiles.
-            </p>
+            <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 text-sm text-blue-800">
+              <p>Consultez le <strong>Journal d'Audit</strong> pour voir toutes les modifications en détail, avec option de revert.</p>
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="bg-gray-50 rounded-lg p-4">
+                <p className="text-2xl font-bold text-clinical-text">{stats.recentChanges}</p>
+                <p className="text-sm text-clinical-muted">modifications (7 derniers jours)</p>
+              </div>
+              <div className="bg-gray-50 rounded-lg p-4">
+                <p className="text-2xl font-bold text-clinical-text">{stats.waisItemsCount}</p>
+                <p className="text-sm text-clinical-muted">items WAIS actifs</p>
+              </div>
+            </div>
           </div>
         )}
 
         {activeTab === 'normes' && (
           <div className="space-y-4">
             <CardHeader>
-              <CardTitle>Comparaison avec les normes WAIS-IV publiées</CardTitle>
+              <CardTitle>Référence normative WAIS-IV</CardTitle>
             </CardHeader>
-            <p className="text-sm text-clinical-subtle mb-3">
-              Scores scalés Mentality vs normes WAIS-IV officielles (moyenne population générale = 100).
-              Valeurs de référence issues de la littérature scientifique publiée.
+            <p className="text-sm text-clinical-muted">
+              Les tables normatives doivent être saisies manuellement depuis le manuel WAIS-IV publié.
+              Utilisez la page <strong>Tables Normatives</strong> pour les importer (CSV) ou les saisir.
             </p>
-            <ResponsiveContainer width="100%" height={320}>
-              <LineChart data={DEMO_NORM_COMPARISON} margin={{ left: -10 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-                <XAxis dataKey="test" tick={{ fontSize: 11 }} />
-                <YAxis domain={[60, 140]} tick={{ fontSize: 11 }} />
-                <Tooltip />
-                <Legend wrapperStyle={{ fontSize: 12 }} />
-                <Line type="monotone" dataKey="mentality" stroke="#3a5bff" strokeWidth={2} dot={{ r: 4 }} name="Mentality" />
-                <Line type="monotone" dataKey="wais_iv" stroke="#94a3b8" strokeWidth={2} strokeDasharray="5 5" dot={false} name="Norme WAIS-IV" />
-              </LineChart>
-            </ResponsiveContainer>
+            <div className="grid grid-cols-3 gap-4 text-sm">
+              {[
+                { label: 'Moyenne WAIS-IV', value: '10', unit: 'score normalisé' },
+                { label: '50e percentile', value: '10', unit: '= score normalisé 10' },
+                { label: 'Plage normale', value: '8-12', unit: 'scores normalisés' },
+              ].map(card => (
+                <div key={card.label} className="bg-gray-50 rounded-lg p-4 text-center">
+                  <p className="text-2xl font-bold text-clinical-text">{card.value}</p>
+                  <p className="text-xs text-clinical-muted mt-1">{card.label}</p>
+                  <p className="text-xs text-clinical-muted">{card.unit}</p>
+                </div>
+              ))}
+            </div>
           </div>
         )}
       </Card>
